@@ -28,3 +28,20 @@ pub fn create_version_udf() -> ScalarUDF {
         version,
     )
 }
+
+pub fn create_db_udf() -> ScalarUDF {
+    let version = make_scalar_function(|args: &[ArrayRef]| {
+        let mut builder = StringBuilder::new(1);
+        builder.append_value("database").unwrap();
+
+        Ok(Arc::new(builder.finish()) as ArrayRef)
+    });
+
+    create_udf(
+        "database",
+        vec![],
+        Arc::new(DataType::Utf8),
+        Volatility::Immutable,
+        version,
+    )
+}
