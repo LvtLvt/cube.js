@@ -116,20 +116,6 @@ impl Backend {
                     )
                 ),
             )
-        } else if query_lower.eq("select version()") {
-            return Ok(
-                Arc::new(
-                    dataframe::DataFrame::new(
-                        vec![dataframe::Column::new(
-                            "VERSION()".to_string(),
-                            ColumnType::MYSQL_TYPE_STRING,
-                        )],
-                        vec![dataframe::Row::new(vec![
-                            dataframe::TableValue::String("8.0.25".to_string())
-                        ])]
-                    )
-                ),
-            )
         } else if query_lower.eq("show collation where charset = 'utf8mb4' and collation = 'utf8mb4_bin'") {
             return Ok(
                 Arc::new(
