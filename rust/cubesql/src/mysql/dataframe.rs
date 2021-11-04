@@ -1,23 +1,19 @@
 use std::fmt::{self, Debug, Formatter};
 
 use chrono::{SecondsFormat, TimeZone, Utc};
-use datafusion::arrow::array::Array;
-use datafusion::arrow::array::BooleanArray;
-use datafusion::arrow::array::Float64Array;
-use datafusion::arrow::array::Int64Array;
-use datafusion::arrow::array::StringArray;
-use datafusion::arrow::array::TimestampMicrosecondArray;
-use datafusion::arrow::array::TimestampNanosecondArray;
-use datafusion::arrow::array::UInt64Array;
-use datafusion::arrow::datatypes::DataType;
-use datafusion::arrow::datatypes::TimeUnit;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::prelude::ExecutionContext;
+use datafusion::arrow::array::{
+    Array, Float64Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
+    UInt32Array,
+};
+use datafusion::arrow::{
+    array::{BooleanArray, TimestampNanosecondArray, UInt64Array},
+    datatypes::{DataType, TimeUnit},
+    record_batch::RecordBatch,
+};
 use log::{error, warn};
 use msql_srv::ColumnType;
 
-use crate::CubeError;
-use crate::compile::builder::CompiledQueryFieldMeta;
+use crate::{compile::builder::CompiledQueryFieldMeta, CubeError};
 
 #[derive(Clone, Debug)]
 pub struct Column {
@@ -126,11 +122,22 @@ impl Row {
                     values.push(column_value);
                 }
                 ColumnType::MYSQL_TYPE_STRING => {
-                    if let Some(v) = value.as_str() {
-                        values.push(TableValue::String(v.to_string()))
-                    } else {
-                        values.push(TableValue::Null);
-                    }
+                    let column_value = match value {
+                        serde_json::Value::Null => TableValue::Null,
+                        serde_json::Value::String(v) => TableValue::String(v.clone()),
+                        serde_json::Value::Bool(v) => TableValue::Boolean(*v),
+                        serde_json::Value::Number(v) => TableValue::String(v.to_string()),
+                        v => {
+                            error!(
+                                "Unable to map value {:?} to MYSQL_TYPE_STRING (returning null)",
+                                v
+                            );
+
+                            TableValue::Null
+                        }
+                    };
+
+                    values.push(column_value);
                 }
                 ColumnType::MYSQL_TYPE_TINY => {
                     let column_value = match value {
@@ -302,6 +309,8 @@ pub fn batch_to_dataframe(batches: &Vec<RecordBatch>) -> Result<DataFrame, CubeE
             let array = batch.column(column_index);
             let num_rows = batch.num_rows();
             match array.data_type() {
+                DataType::Int32 => convert_array!(array, num_rows, rows, Int32Array, Int64, i64),
+                DataType::UInt32 => convert_array!(array, num_rows, rows, UInt32Array, Int64, i64),
                 DataType::UInt64 => convert_array!(array, num_rows, rows, UInt64Array, Int64, i64),
                 DataType::Int64 => convert_array!(array, num_rows, rows, Int64Array, Int64, i64),
                 DataType::Float64 => {
@@ -334,9 +343,7 @@ pub fn batch_to_dataframe(batches: &Vec<RecordBatch>) -> Result<DataFrame, CubeE
                         rows[i].push(if a.is_null(i) {
                             TableValue::Null
                         } else {
-                            TableValue::Timestamp(TimestampValue::new(
-                                a.value(i) * 1000_i64,
-                            ))
+                            TableValue::Timestamp(TimestampValue::new(a.value(i) * 1000_i64))
                         });
                     }
                 }
@@ -349,9 +356,7 @@ pub fn batch_to_dataframe(batches: &Vec<RecordBatch>) -> Result<DataFrame, CubeE
                         rows[i].push(if a.is_null(i) {
                             TableValue::Null
                         } else {
-                            TableValue::Timestamp(TimestampValue::new(
-                                a.value(i),
-                            ))
+                            TableValue::Timestamp(TimestampValue::new(a.value(i)))
                         });
                     }
                 }

@@ -1,6 +1,6 @@
 {
   "name": "@cubejs-backend/native",
-  "version": "0.28.50",
+  "version": "0.28.52",
   "author": "Cube Dev, Inc.",
   "description": "Native module for Cube.js (binding to Rust codebase)",
   "main": "dist/lib/index.js",
@@ -27,7 +27,7 @@
     "dist/lib"
   ],
   "bundledDependencies": [
-    "node-pre-gyp"
+    "@mapbox/node-pre-gyp"
   ],
   "devDependencies": {
     "@types/jest": "^26",

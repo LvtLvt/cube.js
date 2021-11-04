@@ -1,5 +1,6 @@
 use std::env;
 use std::io;
+
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -22,6 +23,7 @@ use tokio::sync::{watch, RwLock};
 use crate::compile::convert_sql_to_cube_query;
 use crate::compile::convert_statement_to_cube_query;
 use crate::compile::parser::MySqlDialectWithBackTicks;
+use crate::compile::QueryPlannerExecutionProps;
 use crate::config::processing_loop::ProcessingLoop;
 use crate::mysql::dataframe::batch_to_dataframe;
 use crate::schema::SchemaService;
@@ -34,6 +36,8 @@ pub mod dataframe;
 struct Backend {
     auth: Arc<dyn SqlAuthService>,
     schema: Arc<dyn SchemaService>,
+    props: QueryPlannerExecutionProps,
+    // From Auth Service
     context: Option<AuthContext>,
 }
 
@@ -58,6 +62,12 @@ impl Backend {
             "set names latin1" => true,
             "rollback" => true,
             "commit" => true,
+            // DataGrip workaround
+            "set character_set_results = utf8" => true,
+            "set character_set_results = latin1" => true,
+            "set autocommit=1" => true,
+            "set sql_mode='strict_trans_tables'" => true,
+            "set sql_select_limit=501" => true,
             _ => false,
         };
 
@@ -93,34 +103,6 @@ impl Backend {
                         vec![dataframe::Row::new(vec![
                             dataframe::TableValue::String("lower_case_table_names".to_string()),
                             dataframe::TableValue::Int64(0)
-                        ])]
-                    )
-                ),
-            )
-        } else if query_lower.eq("select database()") {
-            return Ok(
-                Arc::new(
-                    dataframe::DataFrame::new(
-                        vec![dataframe::Column::new(
-                            "DATABASE()".to_string(),
-                            ColumnType::MYSQL_TYPE_STRING,
-                        )],
-                        vec![dataframe::Row::new(vec![
-                            dataframe::TableValue::String("db".to_string())
-                        ])]
-                    )
-                ),
-            )
-        } else if query_lower.eq("select version()") {
-            return Ok(
-                Arc::new(
-                    dataframe::DataFrame::new(
-                        vec![dataframe::Column::new(
-                            "VERSION()".to_string(),
-                            ColumnType::MYSQL_TYPE_STRING,
-                        )],
-                        vec![dataframe::Row::new(vec![
-                            dataframe::TableValue::String("8.0.25".to_string())
                         ])]
                     )
                 ),
@@ -201,48 +183,6 @@ impl Backend {
                         )],
                         vec![dataframe::Row::new(vec![
                             dataframe::TableValue::String("test collated returns".to_string())
-                        ])]
-                    )
-                ),
-            )
-        } else if query_lower.eq("show schemas") || query_lower.eq("show databases") {
-            return Ok(
-                Arc::new(
-                    dataframe::DataFrame::new(
-                        vec![dataframe::Column::new(
-                            "Database".to_string(),
-                            ColumnType::MYSQL_TYPE_STRING,
-                        )],
-                        vec![
-                            dataframe::Row::new(vec![
-                                dataframe::TableValue::String("db".to_string())
-                            ]),
-                            dataframe::Row::new(vec![
-                                dataframe::TableValue::String("information_schema".to_string())
-                            ]),
-                            dataframe::Row::new(vec![
-                                dataframe::TableValue::String("mysql".to_string())
-                            ]),
-                            dataframe::Row::new(vec![
-                                dataframe::TableValue::String("performance_schema".to_string())
-                            ]),
-                            dataframe::Row::new(vec![
-                                dataframe::TableValue::String("sys".to_string())
-                            ])
-                        ]
-                    )
-                ),
-            )
-        } else if query_lower.eq("select connection_id()") {
-            return Ok(
-                Arc::new(
-                    dataframe::DataFrame::new(
-                        vec![dataframe::Column::new(
-                            "connection_id".to_string(),
-                            ColumnType::MYSQL_TYPE_LONGLONG,
-                        )],
-                        vec![dataframe::Row::new(vec![
-                            dataframe::TableValue::Int64(2)
                         ])]
                     )
                 ),
@@ -342,7 +282,7 @@ impl Backend {
                         .get_ctx_for_tenant(auth_ctx)
                     .await?;
 
-                    let plan = convert_statement_to_cube_query(statement, Arc::new(ctx))?;
+                    let plan = convert_statement_to_cube_query(statement, Arc::new(ctx), &self.props)?;
 
                     return Ok(Arc::new(dataframe::DataFrame::new(
                         vec![
@@ -475,8 +415,11 @@ impl Backend {
                 .get_ctx_for_tenant(auth_ctx)
                 .await?;
 
-            let plan = convert_sql_to_cube_query(&query, Arc::new(ctx))?;
+            let plan = convert_sql_to_cube_query(&query, Arc::new(ctx), &self.props)?;
             match plan {
+                crate::compile::QueryPlan::Meta(data_frame) => {
+                    return Ok(data_frame);
+                },
                 crate::compile::QueryPlan::DataFushionSelect(plan, ctx) => {
                     let df = DataFrameImpl::new(
                         ctx.state,
@@ -485,19 +428,19 @@ impl Backend {
                     let batches = df.collect().await?;
                     let response =  batch_to_dataframe(&batches)?;
 
-                    return Ok(Arc::new(response));
+                    return Ok(Arc::new(response))
                 },
-                crate::compile::QueryPlan::CubeSelect(compiled_query) => {
-                    debug!("Request {}", json!(compiled_query.request).to_string());
-                    debug!("Meta {:?}", compiled_query.meta);
+                crate::compile::QueryPlan::CubeSelect(plan) => {
+                    debug!("Request {}", json!(plan.request).to_string());
+                    debug!("Meta {:?}", plan.meta);
 
                     let response = self.schema
-                        .request(compiled_query.request, auth_ctx)
+                        .request(plan.request, auth_ctx)
                         .await?;
 
                     let mut columns: Vec<dataframe::Column> = vec![];
 
-                    for column_meta in &compiled_query.meta {
+                    for column_meta in &plan.meta {
                         columns.push(dataframe::Column::new(
                             column_meta.column_to.clone(),
                             column_meta.column_type
@@ -508,13 +451,13 @@ impl Backend {
 
                     if let Some(result) = response.results.first() {
                         debug!("Columns {:?}", columns);
-                        debug!("Hydration mapping {:?}", compiled_query.meta);
+                        debug!("Hydration mapping {:?}", plan.meta);
                         trace!("Response from Cube.js {:?}", result.data);
 
                         for row in result.data.iter() {
                             if let Some(record) = row.as_object() {
                                 rows.push(
-                                    dataframe::Row::hydrate_from_response(&compiled_query.meta, record)
+                                    dataframe::Row::hydrate_from_response(&plan.meta, record)
                                 );
                             } else {
                                 error!(
@@ -546,6 +489,14 @@ impl Backend {
 #[async_trait]
 impl<W: io::Write + Send> AsyncMysqlShim<W> for Backend {
     type Error = io::Error;
+
+    fn server_version(&self) -> &str {
+        "8.0.25"
+    }
+
+    fn connection_id(&self) -> u32 {
+        self.props.connection_id()
+    }
 
     async fn on_prepare<'a>(
         &'a mut self,
@@ -661,6 +612,8 @@ impl ProcessingLoop for MySqlServer {
 
         println!("🔗 Cube SQL is listening on {}", self.address);
 
+        let mut connection_id_incr = 0;
+
         loop {
             let mut stop_receiver = self.close_socket_rx.write().await;
             let (socket, _) = tokio::select! {
@@ -684,11 +637,23 @@ impl ProcessingLoop for MySqlServer {
 
             let auth = self.auth.clone();
             let schema = self.schema.clone();
+
+            let connection_id = if connection_id_incr > 100_000_u32 {
+                connection_id_incr = 1;
+
+                connection_id_incr
+            } else {
+                connection_id_incr += 1;
+
+                connection_id_incr
+            };
+
             tokio::spawn(async move {
                 if let Err(e) = AsyncMysqlIntermediary::run_on(
                     Backend {
                         auth,
                         schema,
+                        props: QueryPlannerExecutionProps::new(connection_id, None),
                         context: None,
                     },
                     socket,
